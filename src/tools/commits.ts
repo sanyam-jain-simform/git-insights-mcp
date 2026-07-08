@@ -1,48 +1,74 @@
 import { z } from "zod";
-import { getGit } from "../git.js";
+import { getGit, assertPathInsideRepo, assertSafeRef } from "../git.js";
+import { toCommitSummary } from "./shared.js";
 
 export const listRecentCommitsSchema = {
   count: z.number().min(1).max(100).default(10).describe("Number of commits to return"),
   branch: z.string().optional().describe("Branch or ref to read from (defaults to current branch)"),
 };
+type ListRecentCommitsParams = z.infer<z.ZodObject<typeof listRecentCommitsSchema>>;
 
-export async function listRecentCommits(
-  repoPath: string,
-  params: { count?: number; branch?: string }
-) {
+export async function listRecentCommits(repoPath: string, params: ListRecentCommitsParams) {
   const git = getGit(repoPath);
-  const count = params.count ?? 10;
   const log = await git.log({
-    maxCount: count,
-    ...(params.branch ? { from: params.branch } : {}),
+    maxCount: params.count,
+    ...(params.branch ? { from: assertSafeRef(params.branch) } : {}),
   });
 
   return log.all.map((c) => ({
-    hash: c.hash.slice(0, 7),
+    ...toCommitSummary(c),
     fullHash: c.hash,
-    author: c.author_name,
     email: c.author_email,
-    date: c.date,
-    message: c.message,
   }));
 }
 
 export const searchCommitsSchema = {
   query: z.string().min(1).describe("Keyword or phrase to search for in commit messages"),
-  count: z.number().min(1).max(100).default(20).describe("Max number of matching commits to return"),
+  count: z
+    .number()
+    .min(1)
+    .max(100)
+    .default(20)
+    .describe("Max number of matching commits to return"),
 };
+type SearchCommitsParams = z.infer<z.ZodObject<typeof searchCommitsSchema>>;
 
-export async function searchCommits(repoPath: string, params: { query: string; count?: number }) {
+export async function searchCommits(repoPath: string, params: SearchCommitsParams) {
   const git = getGit(repoPath);
-  const log = await git.log({
-    maxCount: params.count ?? 20,
-    "--grep": params.query,
-  } as any);
+  // `--grep=` keeps the query attached so a leading "-" can't become a flag
+  const log = await git.log([`--grep=${params.query}`, "-n", String(params.count)]);
 
-  return log.all.map((c) => ({
-    hash: c.hash.slice(0, 7),
-    author: c.author_name,
-    date: c.date,
-    message: c.message,
-  }));
+  return log.all.map(toCommitSummary);
+}
+
+export const searchDiffContentsSchema = {
+  query: z
+    .string()
+    .min(1)
+    .describe(
+      "String to search for in diff contents (git pickaxe: commits that added or removed it)",
+    ),
+  count: z
+    .number()
+    .min(1)
+    .max(100)
+    .default(20)
+    .describe("Max number of matching commits to return"),
+  filePath: z
+    .string()
+    .optional()
+    .describe("Optional file path (relative to repo root) to restrict the search to"),
+};
+type SearchDiffContentsParams = z.infer<z.ZodObject<typeof searchDiffContentsSchema>>;
+
+export async function searchDiffContents(repoPath: string, params: SearchDiffContentsParams) {
+  const git = getGit(repoPath);
+  const args = [`-S${params.query}`, "-n", String(params.count)];
+  if (params.filePath) {
+    assertPathInsideRepo(repoPath, params.filePath);
+    args.push("--", params.filePath);
+  }
+  const log = await git.log(args);
+
+  return log.all.map(toCommitSummary);
 }

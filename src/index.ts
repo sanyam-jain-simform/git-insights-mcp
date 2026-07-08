@@ -1,31 +1,50 @@
 #!/usr/bin/env node
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, type ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type {
+  ZodRawShapeCompat,
+  ShapeOutput,
+} from "@modelcontextprotocol/sdk/server/zod-compat.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { resolveRepoPath } from "./git.js";
 import {
   listRecentCommits,
   listRecentCommitsSchema,
   searchCommits,
   searchCommitsSchema,
+  searchDiffContents,
+  searchDiffContentsSchema,
 } from "./tools/commits.js";
 import {
   getCommitDiff,
   getCommitDiffSchema,
   getDiffBetweenBranches,
   getDiffBetweenBranchesSchema,
+  getWorkingTreeDiff,
+  getWorkingTreeDiffSchema,
 } from "./tools/diff.js";
 import {
   getBranchStatus,
   getBranchStatusSchema,
   listBranches,
   listBranchesSchema,
+  listTags,
+  listTagsSchema,
 } from "./tools/status.js";
 import {
   getFileHistory,
   getFileHistorySchema,
   blameFile,
   blameFileSchema,
+  getFileAtRef,
+  getFileAtRefSchema,
 } from "./tools/fileHistory.js";
+import {
+  getContributorStats,
+  getContributorStatsSchema,
+  getFileChurn,
+  getFileChurnSchema,
+} from "./tools/stats.js";
 
 const repoPath = resolveRepoPath();
 
@@ -34,13 +53,13 @@ const server = new McpServer({
   version: "0.1.0",
 });
 
-function asText(data: unknown) {
+function asText(data: unknown): CallToolResult {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
   };
 }
 
-function asError(err: unknown) {
+function asError(err: unknown): CallToolResult {
   const message = err instanceof Error ? err.message : String(err);
   return {
     isError: true,
@@ -48,136 +67,135 @@ function asError(err: unknown) {
   };
 }
 
-server.registerTool(
+function register<S extends ZodRawShapeCompat>(
+  name: string,
+  title: string,
+  description: string,
+  schema: S,
+  fn: (params: ShapeOutput<S>) => Promise<unknown>,
+) {
+  // ToolCallback<S> is conditional on the generic S, so TS can't verify the
+  // callback against it until S is concrete — hence the cast.
+  const cb = async (params: ShapeOutput<S>) => {
+    try {
+      return asText(await fn(params));
+    } catch (err) {
+      return asError(err);
+    }
+  };
+  server.registerTool(
+    name,
+    { title, description, inputSchema: schema },
+    cb as unknown as ToolCallback<S>,
+  );
+}
+
+register(
   "list_recent_commits",
-  {
-    title: "List recent commits",
-    description:
-      "Get the most recent commits on a branch, with author, date, and message.",
-    inputSchema: listRecentCommitsSchema,
-  },
-  async (params) => {
-    try {
-      return asText(await listRecentCommits(repoPath, params));
-    } catch (err) {
-      return asError(err);
-    }
-  },
+  "List recent commits",
+  "Get the most recent commits on a branch, with author, date, and message.",
+  listRecentCommitsSchema,
+  (p) => listRecentCommits(repoPath, p),
 );
 
-server.registerTool(
+register(
   "search_commits",
-  {
-    title: "Search commits",
-    description: "Search commit messages for a keyword or phrase.",
-    inputSchema: searchCommitsSchema,
-  },
-  async (params) => {
-    try {
-      return asText(await searchCommits(repoPath, params));
-    } catch (err) {
-      return asError(err);
-    }
-  },
+  "Search commits",
+  "Search commit messages for a keyword or phrase.",
+  searchCommitsSchema,
+  (p) => searchCommits(repoPath, p),
 );
 
-server.registerTool(
+register(
+  "search_diff_contents",
+  "Search diff contents",
+  "Find commits whose diff added or removed a given string (git pickaxe), optionally scoped to one file.",
+  searchDiffContentsSchema,
+  (p) => searchDiffContents(repoPath, p),
+);
+
+register(
   "get_commit_diff",
-  {
-    title: "Get commit diff",
-    description: "Show the diff and stats for a specific commit hash.",
-    inputSchema: getCommitDiffSchema,
-  },
-  async (params) => {
-    try {
-      return asText(await getCommitDiff(repoPath, params));
-    } catch (err) {
-      return asError(err);
-    }
-  },
+  "Get commit diff",
+  "Show the diff and stats for a specific commit hash.",
+  getCommitDiffSchema,
+  (p) => getCommitDiff(repoPath, p),
 );
 
-server.registerTool(
+register(
   "get_diff_between_branches",
-  {
-    title: "Get diff between branches",
-    description:
-      "Show the diff and change summary between two branches or refs.",
-    inputSchema: getDiffBetweenBranchesSchema,
-  },
-  async (params) => {
-    try {
-      return asText(await getDiffBetweenBranches(repoPath, params));
-    } catch (err) {
-      return asError(err);
-    }
-  },
+  "Get diff between branches",
+  "Show the diff and change summary between two branches or refs.",
+  getDiffBetweenBranchesSchema,
+  (p) => getDiffBetweenBranches(repoPath, p),
 );
 
-server.registerTool(
+register(
+  "get_working_tree_diff",
+  "Get working tree diff",
+  "Show the uncommitted changes in the working tree, split into staged and unstaged diffs.",
+  getWorkingTreeDiffSchema,
+  (p) => getWorkingTreeDiff(repoPath, p),
+);
+
+register(
   "get_branch_status",
-  {
-    title: "Get branch status",
-    description:
-      "Show current branch, ahead/behind counts, and any uncommitted changes.",
-    inputSchema: getBranchStatusSchema,
-  },
-  async () => {
-    try {
-      return asText(await getBranchStatus(repoPath));
-    } catch (err) {
-      return asError(err);
-    }
-  },
+  "Get branch status",
+  "Show current branch, ahead/behind counts, and any uncommitted changes.",
+  getBranchStatusSchema,
+  () => getBranchStatus(repoPath),
 );
 
-server.registerTool(
+register(
   "list_branches",
-  {
-    title: "List branches",
-    description: "List local (and optionally remote) branches in the repo.",
-    inputSchema: listBranchesSchema,
-  },
-  async (params) => {
-    try {
-      return asText(await listBranches(repoPath, params));
-    } catch (err) {
-      return asError(err);
-    }
-  },
+  "List branches",
+  "List local (and optionally remote) branches in the repo.",
+  listBranchesSchema,
+  (p) => listBranches(repoPath, p),
 );
 
-server.registerTool(
+register("list_tags", "List tags", "List tags in the repo, newest first.", listTagsSchema, (p) =>
+  listTags(repoPath, p),
+);
+
+register(
   "get_file_history",
-  {
-    title: "Get file history",
-    description: "Get the commit history for a specific file.",
-    inputSchema: getFileHistorySchema,
-  },
-  async (params) => {
-    try {
-      return asText(await getFileHistory(repoPath, params));
-    } catch (err) {
-      return asError(err);
-    }
-  },
+  "Get file history",
+  "Get the commit history for a specific file.",
+  getFileHistorySchema,
+  (p) => getFileHistory(repoPath, p),
 );
 
-server.registerTool(
+register(
   "blame_file",
-  {
-    title: "Blame file",
-    description:
-      "Show line-by-line commit/author attribution for a file (git blame).",
-    inputSchema: blameFileSchema,
-  },
-  async (params) => {
-    try {
-      return asText(await blameFile(repoPath, params));
-    } catch (err) {
-      return asError(err);
-    }
-  },
+  "Blame file",
+  "Show line-by-line commit/author attribution for a file (git blame), optionally for a line range.",
+  blameFileSchema,
+  (p) => blameFile(repoPath, p),
+);
+
+register(
+  "get_file_at_ref",
+  "Get file at ref",
+  "Read a file's contents as of a given branch, tag, or commit.",
+  getFileAtRefSchema,
+  (p) => getFileAtRef(repoPath, p),
+);
+
+register(
+  "get_contributor_stats",
+  "Get contributor stats",
+  "Summarize commit counts per author across the history of a ref.",
+  getContributorStatsSchema,
+  (p) => getContributorStats(repoPath, p),
+);
+
+register(
+  "get_file_churn",
+  "Get file churn",
+  "Rank the most frequently changed files (hotspots) over recent history.",
+  getFileChurnSchema,
+  (p) => getFileChurn(repoPath, p),
 );
 
 async function main() {
@@ -190,4 +208,3 @@ main().catch((err) => {
   console.error("Fatal error starting git-insights-mcp:", err);
   process.exit(1);
 });
-// C:\My Data\Office projects\modforge
